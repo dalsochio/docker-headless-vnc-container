@@ -2,11 +2,11 @@
 
 Minimal Docker image with a headless VNC desktop environment, based on [ConSol/docker-headless-vnc-container](https://github.com/ConSol/docker-headless-vnc-container).
 
-- **Debian 13 (trixie)** base
+- **Debian 13 (trixie)** base, pinned by digest
 - **XFCE4** desktop (dark mode, no window decorations)
 - **TigerVNC** server (port `5901`)
 - **noVNC 1.6.0** HTML5 client (port `6901`)
-- **fingerprint-chromium** pre-installed at `/opt/fingerprint-chromium/`
+- **fingerprint-chromium** pre-installed at `/opt/fingerprint-chromium/` (SHA256-verified)
 - Tools: x11vnc, xdotool, socat, ffmpeg, iptables, iproute2, curl, jq, etc.
 
 ## Usage
@@ -64,12 +64,62 @@ USER 1000
 
 Only `linux/amd64` (fingerprint-chromium constraint).
 
+## Quick Test
+
+```bash
+# Build and run
+docker build -t headless-vnc .
+docker run -d --rm --name vnc-test -p 5901:5901 -p 6901:6901 --shm-size=256m -e VNC_PASSWORDLESS=true headless-vnc
+
+# Wait for VNC to start, then launch fingerprint-chromium
+sleep 5
+docker exec vnc-test bash -c 'DISPLAY=:1 /opt/fingerprint-chromium/chrome \
+  --no-sandbox --no-first-run --disable-default-apps \
+  --start-maximized --force-dark-mode \
+  --fingerprint="12345" &'
+
+# Open in browser
+# http://localhost:6901
+
+# Cleanup
+docker stop vnc-test
+```
+
 ## Structure
 
 ```
-Dockerfile              # Multi-stage build
+Dockerfile              # Multi-stage build (3 stages), pinned base digest
 src/
-  install/              # Package install scripts (unused at runtime, baked into image)
+  install/              # Install scripts (tools, tigervnc, xfce, novnc, chromium, etc.)
   scripts/              # vnc_startup.sh, generate_container_user
   xfce/                 # wm_startup.sh, XFCE configs (dark mode, panel, etc.)
+```
+
+## Updating
+
+Versions are controlled by `ARG`s at the top of the `Dockerfile`:
+
+| Component | ARG | Current |
+|---|---|---|
+| Base image | `BASE_IMAGE` | `debian:trixie-slim@sha256:26f9...` |
+| fingerprint-chromium | `FINGERPRINT_CHROMIUM_VERSION` | `144.0.7559.132` |
+| fingerprint-chromium checksum | `FINGERPRINT_CHROMIUM_SHA256` | `bb4c4484...` |
+| noVNC | `NOVNC_VERSION` | `1.6.0` |
+| websockify | `WEBSOCKIFY_VERSION` | `0.13.0` |
+
+To update safely:
+
+```bash
+# 1. Update base image digest
+docker pull debian:trixie-slim
+docker inspect --format='{{index .RepoDigests 0}}' debian:trixie-slim
+# Replace the digest in Dockerfile ARG BASE_IMAGE
+
+# 2. Update fingerprint-chromium (if new release)
+# Download new tarball and get its SHA256:
+curl -sL "https://github.com/adryfish/fingerprint-chromium/releases/download/<VERSION>/ungoogled-chromium-<VERSION>-1-x86_64_linux.tar.xz" | sha256sum
+# Update FINGERPRINT_CHROMIUM_VERSION and FINGERPRINT_CHROMIUM_SHA256
+
+# 3. Rebuild with latest security patches
+docker build --pull --no-cache -t headless-vnc .
 ```

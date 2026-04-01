@@ -1,29 +1,30 @@
+# Pinned base image for reproducible builds
+# To update: docker pull debian:trixie-slim && docker inspect --format='{{index .RepoDigests 0}}' debian:trixie-slim
+ARG BASE_IMAGE=debian:trixie-slim@sha256:26f98ccd92fd0a44d6928ce8ff8f4921b4d2f535bfa07555ee5d18f61429cf0c
+
 ## Stage 1: Download and extract fingerprint-chromium
-FROM debian:trixie-slim AS chromium-downloader
+FROM ${BASE_IMAGE} AS chromium-downloader
 ARG FINGERPRINT_CHROMIUM_VERSION=144.0.7559.132
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
-    && curl -sL "https://github.com/adryfish/fingerprint-chromium/releases/download/${FINGERPRINT_CHROMIUM_VERSION}/ungoogled-chromium-${FINGERPRINT_CHROMIUM_VERSION}-1-x86_64_linux.tar.xz" \
-       -o /tmp/fp-chromium.tar.xz \
-    && mkdir -p /opt/fingerprint-chromium \
-    && tar -xJf /tmp/fp-chromium.tar.xz -C /opt/fingerprint-chromium --strip-components=1 \
-    && chmod +x /opt/fingerprint-chromium/chrome \
-    && rm -f /tmp/fp-chromium.tar.xz
+ARG FINGERPRINT_CHROMIUM_SHA256=bb4c44840bae7e881f6258ed5b33f972f284384d898b6289e1f0c0bf47555ede
+ENV FINGERPRINT_CHROMIUM_VERSION=$FINGERPRINT_CHROMIUM_VERSION \
+    FINGERPRINT_CHROMIUM_SHA256=$FINGERPRINT_CHROMIUM_SHA256
+COPY src/install/fingerprint_chromium.sh /tmp/
+RUN chmod +x /tmp/fingerprint_chromium.sh && /tmp/fingerprint_chromium.sh
 
 ## Stage 2: Download noVNC + websockify
-FROM debian:trixie-slim AS novnc-downloader
+FROM ${BASE_IMAGE} AS novnc-downloader
 ARG NOVNC_VERSION=1.6.0
 ARG WEBSOCKIFY_VERSION=0.13.0
 ARG NOVNC_TITLE=cloudDevTools
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
-    && mkdir -p /novnc/utils/websockify \
-    && curl -sL "https://github.com/novnc/noVNC/archive/v${NOVNC_VERSION}.tar.gz" | tar xz --strip 1 -C /novnc \
-    && curl -sL "https://github.com/novnc/websockify/archive/v${WEBSOCKIFY_VERSION}.tar.gz" | tar xz --strip 1 -C /novnc/utils/websockify \
-    && ln -s /novnc/vnc_lite.html /novnc/index.html \
-    && sed -i "s|<title>noVNC</title>|<title>${NOVNC_TITLE}</title>|" /novnc/vnc.html /novnc/vnc_lite.html \
-    && sed -i 's|<div id="top_bar">|<div id="top_bar" style="display: none;">|' /novnc/vnc_lite.html
+ENV NOVNC_VERSION=$NOVNC_VERSION \
+    WEBSOCKIFY_VERSION=$WEBSOCKIFY_VERSION \
+    NOVNC_TITLE=$NOVNC_TITLE \
+    NO_VNC_HOME=/novnc
+COPY src/install/no_vnc.sh /tmp/
+RUN chmod +x /tmp/no_vnc.sh && /tmp/no_vnc.sh
 
 ## Stage 3: Final image
-FROM debian:trixie-slim
+FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     DISPLAY=:1 \
@@ -31,6 +32,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NO_VNC_PORT=6901 \
     HOME=/headless \
     STARTUPDIR=/dockerstartup \
+    INST_SCRIPTS=/headless/install \
     NO_VNC_HOME=/headless/noVNC \
     VNC_COL_DEPTH=24 \
     VNC_RESOLUTION=1280x1024 \
@@ -44,63 +46,39 @@ EXPOSE $VNC_PORT $NO_VNC_PORT
 
 WORKDIR $HOME
 
-### Single apt-get layer: all packages + cleanup
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    # -- basic tools --
-    ca-certificates vim-tiny curl wget nano unzip jq bzip2 locales apt-utils \
-    net-tools procps \
-    # -- VNC & desktop --
-    tigervnc-standalone-server tigervnc-tools \
-    xfce4 xfce4-terminal xterm dbus-x11 libdbus-glib-1-2 \
-    x11vnc x11-xserver-utils xdotool \
-    # -- network tools --
-    socat iptables iproute2 \
-    # -- media --
-    ffmpeg \
-    # -- scheduled tasks --
-    cron \
-    # -- container user support --
-    libnss-wrapper gettext \
-    # -- fingerprint-chromium runtime deps --
-    libnss3 libatk-bridge2.0-0 libcups2 libdrm2 \
-    libxkbcommon0 libgbm1 libasound2t64 libgtk-3-0t64 \
-    && apt-get purge -y pm-utils *screensaver* \
-    # -- locale --
-    && echo "en_US.UTF-8 UTF-8" > /etc/locale.gen && locale-gen \
-    # -- allow remote VNC --
-    && echo '$localhost = "no";' >> /etc/tigervnc/vncserver-config-defaults \
-    # -- cleanup --
+### Copy install scripts into image (kept at /headless/install/ for reference)
+COPY src/install/ $INST_SCRIPTS/
+RUN find $INST_SCRIPTS -name '*.sh' -exec chmod a+x {} +
+
+### Single layer: run all install scripts + cleanup
+RUN apt-get update && apt-get upgrade -y \
+    && $INST_SCRIPTS/tools.sh \
+    && $INST_SCRIPTS/tigervnc.sh \
+    && $INST_SCRIPTS/xfce_ui.sh \
+    && $INST_SCRIPTS/chromium_deps.sh \
+    && $INST_SCRIPTS/libnss_wrapper.sh \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
     && find /usr/share/doc -mindepth 1 -not -name 'copyright' -delete 2>/dev/null || true \
     && find /usr/share/man -type f -delete 2>/dev/null || true \
     && find /usr/share/locale -mindepth 1 -maxdepth 1 -not -name 'en*' -exec rm -rf {} + 2>/dev/null || true
 
-### Copy noVNC from downloader stage (no curl/xz-utils bloat)
+### Copy noVNC from downloader stage
 COPY --from=novnc-downloader /novnc $NO_VNC_HOME
 
-### Copy fingerprint-chromium from downloader stage (no xz-utils bloat)
+### Copy fingerprint-chromium from downloader stage
 COPY --from=chromium-downloader /opt/fingerprint-chromium /opt/fingerprint-chromium
 
 ### Runtime scripts
 COPY src/scripts/ $STARTUPDIR/
 
-### XFCE config (dark mode, no window buttons, 28px panel, no icons, no wallpaper)
-COPY src/xfce/.config/ $HOME/.config/
+### XFCE desktop (wm_startup.sh, dark mode, no window buttons, 28px panel, no icons, no wallpaper)
+COPY src/xfce/ $HOME/
 RUN mkdir -p /etc/xdg/xfce4/xfconf/xfce-perchannel-xml \
     && cp $HOME/.config/xfce4/xfconf/xfce-perchannel-xml/*.xml /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/
 
-### Window manager startup
-COPY src/xfce/wm_startup.sh $HOME/wm_startup.sh
-
-### nss_wrapper hook in .bashrc
-RUN echo 'source $STARTUPDIR/generate_container_user' >> $HOME/.bashrc
-
-### Fix permissions
-RUN find $STARTUPDIR/ $HOME/ -name '*.sh' -exec chmod a+x {} + \
-    && chgrp -R 0 $STARTUPDIR $HOME \
-    && chmod -R a+rw $STARTUPDIR $HOME \
-    && find $STARTUPDIR/ $HOME/ -type d -exec chmod a+x {} +
+### Fix permissions for $STARTUPDIR $HOME
+RUN $INST_SCRIPTS/set_user_permission.sh $STARTUPDIR $HOME
 
 USER 1000
 
